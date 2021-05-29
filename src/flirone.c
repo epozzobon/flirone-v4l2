@@ -38,17 +38,30 @@
 #include <fcntl.h>
 #include <assert.h>
 
+#define GEN3
+
 #define VIDEO_DEVICE0 "/dev/video1"  // gray scale thermal image
+#ifdef GEN3
+#define FRAME_WIDTH0  80
+#define FRAME_HEIGHT0 60
+#define TEXTBOX_HEIGHT 16
+#else
 #define FRAME_WIDTH0  160
 #define FRAME_HEIGHT0 120
+#define TEXTBOX_HEIGHT 8
+#endif
+
 
 #define VIDEO_DEVICE1 "/dev/video2" // color visible image
 #define FRAME_WIDTH1  640
 #define FRAME_HEIGHT1 480
 
 #define VIDEO_DEVICE2 "/dev/video3" // colorized thermal image
-#define FRAME_WIDTH2  160
-#define FRAME_HEIGHT2 128
+#define FRAME_WIDTH2  FRAME_WIDTH0
+#define FRAME_HEIGHT2 (FRAME_HEIGHT0+TEXTBOX_HEIGHT)
+
+#define LINE_STRIDE (FRAME_WIDTH0 * 164 / 160)
+#define LINE_OFFSET 32
 
 #define FRAME_FORMAT0 V4L2_PIX_FMT_GREY
 #define FRAME_FORMAT1 V4L2_PIX_FMT_MJPEG
@@ -120,7 +133,7 @@ void font_write(unsigned char *fb, int x, int y, const char *string)
 //	fb[(y+ry) * 160 + (x + rx)] = v ? 0 : 0xFF;                       // black / white
 //	fb[(y+rx) * 160 + (x + ry)] = v ? 0 : 0xFF;                       // black / white
 
-        fb[(y+rx) * 160 + (x + ry)] = v ? 0 : fb[(y+rx) * 160 + (x + ry)];  // transparent
+        fb[(y+rx) * FRAME_WIDTH2 + (x + ry)] = v ? 0 : fb[(y+rx) * FRAME_WIDTH2 + (x + ry)];  // transparent
       }
     }
     string++;
@@ -321,14 +334,14 @@ void vframe(char ep[],char EP_error[], int r, int actual_length, unsigned char b
   
   buf85pointer=0;
   
-  unsigned short pix[160*120];   // original Flir 16 Bit RAW
+  unsigned short pix[FRAME_WIDTH0*FRAME_HEIGHT0];   // original Flir 16 Bit RAW
   int x, y;
   unsigned char *fb_proc,*fb_proc2; 
 
-  fb_proc = malloc(160 * 128); // 8 Bit gray buffer really needs only 160 x 120
-  memset(fb_proc, 128, 160*128);       // sizeof(fb_proc) doesn't work, value depends from LUT
+  fb_proc = malloc(FRAME_WIDTH2 * FRAME_HEIGHT2); // 8 Bit gray buffer really needs only FRAME_WIDTH0 x FRAME_HEIGHT0
+  memset(fb_proc, 128, FRAME_WIDTH2*FRAME_HEIGHT2);       // sizeof(fb_proc) doesn't work, value depends from LUT
   
-  fb_proc2 = malloc(160 * 128 * 3 ); // 8x8x8  Bit RGB buffer 
+  fb_proc2 = malloc(FRAME_WIDTH2 * FRAME_HEIGHT2* 3 ); // 8x8x8  Bit RGB buffer 
 
   int min = 0x10000, max = 0;
   float rms = 0;
@@ -336,14 +349,14 @@ void vframe(char ep[],char EP_error[], int r, int actual_length, unsigned char b
 // Make a unsigned short array from what comes from the thermal frame
 // find the max, min and RMS (not used yet) values of the array
   int maxx, maxy;
-  for (y = 0; y < 120; ++y) 
+  for (y = 0; y < FRAME_HEIGHT0; ++y) 
   {
-    for (x = 0; x < 160; ++x) {
+    for (x = 0; x < FRAME_WIDTH0; ++x) {
       if (x<80) 
-         v = buf85[2*(y * 164 + x) +32]+256*buf85[2*(y * 164 + x) +33];
+         v = buf85[2*(y * LINE_STRIDE + x) +LINE_OFFSET]+256*buf85[2*(y * LINE_STRIDE + x) +LINE_OFFSET+1];
       else
-         v = buf85[2*(y * 164 + x) +32+4]+256*buf85[2*(y * 164 + x) +33+4];   
-      pix[y * 160 + x] = v;   // unsigned char!!
+         v = buf85[2*(y * LINE_STRIDE + x) +LINE_OFFSET+4]+256*buf85[2*(y * LINE_STRIDE + x) +LINE_OFFSET+1+4];   
+      pix[y * FRAME_WIDTH0 + x] = v;   // unsigned char!!
       
       if (v < min) min = v;
       if (v > max) { max = v; maxx = x; maxy = y; }
@@ -352,7 +365,7 @@ void vframe(char ep[],char EP_error[], int r, int actual_length, unsigned char b
   }
     
   // RMS used later
-//  rms /= 160 * 120;
+//  rms /= FRAME_WIDTH0 * FRAME_HEIGHT0;
 //  rms = sqrtf(rms);
   
 // scale the data in the array
@@ -360,13 +373,13 @@ void vframe(char ep[],char EP_error[], int r, int actual_length, unsigned char b
   if (!delta) delta = 1;   // if max = min we have divide by zero
   int scale = 0x10000 / delta;
 
-  for (y = 0; y < 120; ++y)    //120
+  for (y = 0; y < FRAME_HEIGHT0; ++y)
   {
-    for (x = 0; x < 160; ++x) {   //160
-      int v = (pix[y * 160 + x] - min) * scale >> 8;
+    for (x = 0; x < FRAME_WIDTH0; ++x) {
+      int v = (pix[y * FRAME_WIDTH0 + x] - min) * scale >> 8;
 
 // fb_proc is the gray scale frame buffer
-      fb_proc[y * 160 + x] = v;   // unsigned char!!
+      fb_proc[y * FRAME_WIDTH0 + x] = v;   // unsigned char!!
 
     }
   }
@@ -379,42 +392,51 @@ void vframe(char ep[],char EP_error[], int r, int actual_length, unsigned char b
   strftime (st1, 60, "%H:%M:%S", loctime);
    
   // calc medium of 2x2 center pixels
-  int med = (pix[59 * 160 + 79]+pix[59 * 160 + 80]+pix[60 * 160 + 79]+pix[60 * 160 + 80])/4;
+  int med = (
+          pix[(FRAME_HEIGHT0/2-1) * FRAME_WIDTH0 + (FRAME_WIDTH0/2-1)] +
+          pix[(FRAME_HEIGHT0/2-1) * FRAME_WIDTH0 + (FRAME_WIDTH0 / 2)] + 
+          pix[(FRAME_HEIGHT0 / 2) * FRAME_WIDTH0 + (FRAME_WIDTH0/2-1)] + 
+          pix[(FRAME_HEIGHT0 / 2) * FRAME_WIDTH0 + (FRAME_WIDTH0 / 2)] )/4;
   sprintf(st2," %.1f/%.1f/%.1f'C", raw2temperature(min),raw2temperature(med),raw2temperature(max));
   strcat(st1, st2);
   
-  #define MAX 26 // max chars in line  160/6=26,6 
-  strncpy(st2, st1, MAX);
+  #define MAX (FRAME_WIDTH0 / 6) // max chars in line
+  strncpy(st2, st1, MAX+1);
   // write zero to string !! 
-  st2[MAX-1] = '\0';
-  font_write(fb_proc, 1, 120, st2);
+  st2[MAX] = '\0';
+  font_write(fb_proc, 1, FRAME_HEIGHT0, st2);
+#ifdef GEN3
+  strncpy(st2, st1+MAX, MAX+1);
+  st2[MAX] = '\0';
+  font_write(fb_proc, 1, FRAME_HEIGHT0+8, st2);
+#endif
 
   // show crosshairs, remove if required 
-  font_write(fb_proc, 80-2, 60-3, "+");
+  font_write(fb_proc, FRAME_WIDTH0/2-2, FRAME_HEIGHT0/2-3, "+");
 
   maxx -= 4;
   maxy -= 4;
 
   if (maxx < 0) maxx = 0; 
   if (maxy < 0) maxy = 0;
-  if (maxx > 150) maxx = 150;
-  if (maxy > 110) maxy = 110;
+  if (maxx > FRAME_WIDTH0-10) maxx = FRAME_WIDTH0-10;
+  if (maxy > FRAME_HEIGHT0-10) maxy = FRAME_HEIGHT0-10;
 
-  font_write(fb_proc, 160-6, maxy, "<");
-  font_write(fb_proc, maxx, 120-8, "|");
+  font_write(fb_proc, FRAME_WIDTH0-6, maxy, "<");
+  font_write(fb_proc, maxx, FRAME_HEIGHT0-8, "|");
 
-  for (y = 0; y < 128; ++y) 
+  for (y = 0; y < FRAME_HEIGHT2; ++y) 
   {
-    for (x = 0; x < 160; ++x) {  
+    for (x = 0; x < FRAME_WIDTH2; ++x) {  
 
 // fb_proc is the gray scale frame buffer
-    v=fb_proc[y * 160 + x] ;   // unsigned char!!
+    v=fb_proc[y * FRAME_WIDTH2 + x] ;   // unsigned char!!
 
 // fb_proc2 is an 24bit RGB buffer
 
-    fb_proc2[3*y * 160 + x*3] = colormap[3 * v];   // unsigned char!!
-    fb_proc2[(3*y * 160 + x*3)+1] = colormap[3 * v + 1];   // unsigned char!!
-    fb_proc2[(3*y * 160 + x*3)+2] = colormap[3 * v + 2];   // unsigned char!!
+    fb_proc2[3*y * FRAME_WIDTH2 + x*3] = colormap[3 * v];   // unsigned char!!
+    fb_proc2[(3*y * FRAME_WIDTH2 + x*3)+1] = colormap[3 * v + 1];   // unsigned char!!
+    fb_proc2[(3*y * FRAME_WIDTH2 + x*3)+2] = colormap[3 * v + 2];   // unsigned char!!
     }
   }
 
